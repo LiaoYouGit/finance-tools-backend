@@ -11,8 +11,12 @@ spring:
 
   datasource:
     username: root
-    password: tz123456
+#    password: tz123456
     url: jdbc:mysql://localhost:3306/finance
+    password: tama1998
 
-
-
+jwt:
+  secret: FinanceToolBackend2024SecretKeyForJwtTokenGenerationMustBeLongEnough!@#$%
+  access-token-expiration: 1800000
+  refresh-token-expiration: 604800000
+  refresh-token-remember-expiration: 2592000000
