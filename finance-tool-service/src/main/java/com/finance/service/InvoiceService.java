@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -23,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -32,6 +34,12 @@ import java.util.zip.ZipOutputStream;
 public class InvoiceService {
 
     private static final String UNRECOGNIZED_DIR = "未识别";
+
+    /** 分片上传限制：单片 2MB、单片数上限 1200、合并后总大小 300MB */
+    private static final Pattern SAFE_UPLOAD_ID = Pattern.compile("[a-zA-Z0-9-]{8,64}");
+    private static final int MAX_CHUNKS = 1200;
+    private static final long MAX_CHUNK_BYTES = 2 * 1024 * 1024L;
+    private static final long MAX_TOTAL_BYTES = 300L * 1024 * 1024L;
 
     private final String tempDir = System.getProperty("java.io.tmpdir") + "/invoice_parse/";
     private final ConcurrentHashMap<String, File> fileStore = new ConcurrentHashMap<>();
@@ -53,7 +61,8 @@ public class InvoiceService {
         if (dirs != null) {
             for (File dir : dirs) {
                 String name = dir.getName();
-                if (dir.isDirectory() && (name.startsWith("work_") || name.startsWith("classify_"))) {
+                if (dir.isDirectory()
+                        && (name.startsWith("work_") || name.startsWith("classify_") || name.startsWith("chunk_"))) {
                     if (now - dir.lastModified() > maxAgeMs) {
                         deleteRecursively(dir);
                     }
@@ -110,12 +119,7 @@ public class InvoiceService {
     }
 
     public ClassifyResult classifyInvoices(MultipartFile file, String classifyBy, String dateGranularity) throws IOException {
-        if (!List.of("date", "buyer", "seller").contains(classifyBy)) {
-            throw new RuntimeException("不支持的归类方式：" + classifyBy);
-        }
-        if (!List.of("month", "day").contains(dateGranularity)) {
-            throw new RuntimeException("不支持的日期粒度：" + dateGranularity);
-        }
+        validateClassifyParams(classifyBy, dateGranularity);
 
         String id = UUID.randomUUID().toString().replace("-", "");
         Path workDir = Path.of(tempDir + "classify_" + id + "/");
@@ -124,10 +128,89 @@ public class InvoiceService {
         File uploaded = workDir.resolve("uploaded").toFile();
         file.transferTo(uploaded);
 
+        return doClassify(uploaded, file.getOriginalFilename(), classifyBy, dateGranularity, workDir, id);
+    }
+
+    /**
+     * 分片上传：每个分片独立落盘（序号.part），单片失败可重传，全部到齐后由合并接口处理。
+     * 前端每片控制在 512KB（低于 nginx 默认 1MB 请求体限制），无需调整服务器配置。
+     */
+    public void chunkUpload(String uploadId, int chunkIndex, MultipartFile chunk) throws IOException {
+        if (uploadId == null || !SAFE_UPLOAD_ID.matcher(uploadId).matches()) {
+            throw new RuntimeException("非法的上传标识");
+        }
+        if (chunkIndex < 0 || chunkIndex >= MAX_CHUNKS) {
+            throw new RuntimeException("分片序号超出范围");
+        }
+        if (chunk.getSize() > MAX_CHUNK_BYTES) {
+            throw new RuntimeException("单个分片不能超过 2MB");
+        }
+        File chunkDir = new File(tempDir + "chunk_" + uploadId + "/");
+        chunkDir.mkdirs();
+        chunk.transferTo(new File(chunkDir, chunkIndex + ".part"));
+    }
+
+    /**
+     * 分片合并：按序拼接所有分片为完整文件后复用归类逻辑，成功入队后立即清理分片目录。
+     */
+    public ClassifyResult chunkMergeAndClassify(String uploadId, String fileName, String classifyBy,
+                                                String dateGranularity, int totalChunks) throws IOException {
+        if (uploadId == null || !SAFE_UPLOAD_ID.matcher(uploadId).matches()) {
+            throw new RuntimeException("非法的上传标识");
+        }
+        validateClassifyParams(classifyBy, dateGranularity);
+        if (totalChunks < 1 || totalChunks > MAX_CHUNKS) {
+            throw new RuntimeException("分片数量超出范围");
+        }
+
+        File chunkDir = new File(tempDir + "chunk_" + uploadId + "/");
+        if (!chunkDir.isDirectory()) {
+            throw new RuntimeException("上传会话不存在或已过期，请重新上传");
+        }
+
+        String id = UUID.randomUUID().toString().replace("-", "");
+        Path workDir = Path.of(tempDir + "classify_" + id + "/");
+        Files.createDirectories(workDir);
+
+        File uploaded = workDir.resolve("uploaded").toFile();
+        try (OutputStream out = Files.newOutputStream(uploaded.toPath())) {
+            byte[] buffer = new byte[8192];
+            for (int i = 0; i < totalChunks; i++) {
+                File part = new File(chunkDir, i + ".part");
+                if (!part.exists()) {
+                    throw new RuntimeException("分片 " + i + " 缺失，请重新上传");
+                }
+                try (InputStream in = Files.newInputStream(part.toPath())) {
+                    int len;
+                    while ((len = in.read(buffer)) > 0) {
+                        out.write(buffer, 0, len);
+                    }
+                }
+            }
+        }
+        if (uploaded.length() > MAX_TOTAL_BYTES) {
+            throw new RuntimeException("文件总大小超过 300MB 限制");
+        }
+
+        deleteRecursively(chunkDir);
+
+        return doClassify(uploaded, fileName, classifyBy, dateGranularity, workDir, id);
+    }
+
+    private void validateClassifyParams(String classifyBy, String dateGranularity) {
+        if (!List.of("date", "buyer", "seller").contains(classifyBy)) {
+            throw new RuntimeException("不支持的归类方式：" + classifyBy);
+        }
+        if (!List.of("month", "day").contains(dateGranularity)) {
+            throw new RuntimeException("不支持的日期粒度：" + dateGranularity);
+        }
+    }
+
+    private ClassifyResult doClassify(File uploaded, String filename, String classifyBy,
+                                      String dateGranularity, Path workDir, String id) throws IOException {
         List<File> pdfFiles = new ArrayList<>();
         List<File> otherFiles = new ArrayList<>();
 
-        String filename = file.getOriginalFilename();
         if (filename != null && filename.toLowerCase().endsWith(".zip")) {
             File unzipDir = workDir.resolve("unzipped").toFile();
             unzipDir.mkdirs();

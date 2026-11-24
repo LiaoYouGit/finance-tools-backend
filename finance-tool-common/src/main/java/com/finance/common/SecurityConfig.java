@@ -33,7 +33,9 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/auth/login", "/auth/register", "/auth/refresh", "/tool/list", "/invoice/debug", "/invoice/parse", "/invoice/classify", "/invoice/download").permitAll()
+                        // /error 必须放行：异常经 ERROR dispatch 转发到 /error 时会再次进入安全链，
+                        // 否则所有错误响应（400/500）都会被入口点改写成 401「未登录」，掩盖真实错误
+                        .requestMatchers("/auth/login", "/auth/register", "/auth/refresh", "/tool/list", "/invoice/debug", "/invoice/parse", "/invoice/classify", "/invoice/classify/**", "/invoice/download", "/error").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)

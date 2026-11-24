@@ -40,6 +40,27 @@ public class InvoiceController {
         return Result.ok(result);
     }
 
+    @PostMapping("/classify/chunk")
+    public Result<Boolean> uploadClassifyChunk(
+            @RequestParam("uploadId") String uploadId,
+            @RequestParam("chunkIndex") int chunkIndex,
+            @RequestParam("file") MultipartFile file) throws IOException {
+        invoiceService.chunkUpload(uploadId, chunkIndex, file);
+        return Result.ok(Boolean.TRUE);
+    }
+
+    @PostMapping("/classify/chunk/merge")
+    public Result<InvoiceService.ClassifyResult> mergeClassifyChunks(
+            @RequestParam("uploadId") String uploadId,
+            @RequestParam("fileName") String fileName,
+            @RequestParam(value = "classifyBy", defaultValue = "date") String classifyBy,
+            @RequestParam(value = "dateGranularity", defaultValue = "month") String dateGranularity,
+            @RequestParam("totalChunks") int totalChunks) throws IOException {
+        InvoiceService.ClassifyResult result = invoiceService.chunkMergeAndClassify(
+                uploadId, fileName, classifyBy, dateGranularity, totalChunks);
+        return Result.ok(result);
+    }
+
     @PostMapping("/debug")
     public Result<String> debugExtractText(@RequestParam("file") MultipartFile file) throws IOException {
         File temp = File.createTempFile("invoice_debug_", ".pdf");
