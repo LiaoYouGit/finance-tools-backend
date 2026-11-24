@@ -31,6 +31,15 @@ public class InvoiceController {
         return Result.ok(result);
     }
 
+    @PostMapping("/classify")
+    public Result<InvoiceService.ClassifyResult> classifyInvoices(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "classifyBy", defaultValue = "date") String classifyBy,
+            @RequestParam(value = "dateGranularity", defaultValue = "month") String dateGranularity) throws IOException {
+        InvoiceService.ClassifyResult result = invoiceService.classifyInvoices(file, classifyBy, dateGranularity);
+        return Result.ok(result);
+    }
+
     @PostMapping("/debug")
     public Result<String> debugExtractText(@RequestParam("file") MultipartFile file) throws IOException {
         File temp = File.createTempFile("invoice_debug_", ".pdf");

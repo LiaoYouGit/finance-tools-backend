@@ -6,8 +6,8 @@ server:
 spring:
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 50MB
+      max-file-size: 300MB
+      max-request-size: 300MB
 
   datasource:
     username: root
@@ -24,3 +24,8 @@ jwt:
   access-token-expiration: 1800000
   refresh-token-expiration: 604800000
   refresh-token-remember-expiration: 2592000000
+
+# 临时文件（上传件、解压目录、归类/拆分结果）保留时长，超时由定时任务自动清理
+file:
+  cleanup:
+    max-age-hours: 12

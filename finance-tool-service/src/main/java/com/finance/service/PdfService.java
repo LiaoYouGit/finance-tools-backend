@@ -8,6 +8,8 @@ import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.jetbrains.annotations.NotNull;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.FileSystemUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -30,6 +32,36 @@ public class PdfService {
 
     private final String tempDir = System.getProperty("java.io.tmpdir") + "/pdfsplit/";
     private final ConcurrentHashMap<String, File> fileStore = new ConcurrentHashMap<>();
+
+    @Value("${file.cleanup.max-age-hours:12}")
+    private int maxAgeHours;
+
+    /**
+     * 每小时清理超过保留期的拆分临时文件（上传件、按比例拆分的工作目录与结果 zip）。
+     */
+    @Scheduled(fixedDelay = 3600_000, initialDelay = 60_000)
+    public void cleanupExpiredFiles() {
+        long maxAgeMs = maxAgeHours * 3600_000L;
+        long now = System.currentTimeMillis();
+
+        File base = new File(tempDir);
+        File[] dirs = base.listFiles();
+        if (dirs != null) {
+            for (File dir : dirs) {
+                if (dir.isDirectory() && dir.getName().startsWith("split_ratio_")) {
+                    if (now - dir.lastModified() > maxAgeMs) {
+                        FileSystemUtils.deleteRecursively(dir);
+                    }
+                }
+            }
+        }
+
+        // 同步移除 fileStore 中已不存在或过期的条目，使对应下载 id 失效
+        fileStore.entrySet().removeIf(e -> {
+            File f = e.getValue();
+            return !f.exists() || now - f.lastModified() > maxAgeMs;
+        });
+    }
 
     public File splitInvoices(MultipartFile zipFile) throws IOException {
         Path dirPath = Paths.get(tempDir);
